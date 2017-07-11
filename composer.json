@@ -1,0 +1,34 @@
+{
+  "name": "objective-php/solr-gateway",
+  "description": "Abstract SolR Gateway",
+  "type": "library",
+  "keywords": [
+    "dao",
+    "database",
+    "objective php",
+    "solr"
+  ],
+  "homepage": "https://github.com/objective-php/solr-gateway",
+  "license": "GPL-3.0",
+  "authors": [
+    {
+      "name": "Gauthier 'Rusty' Delamarre",
+      "email": "gauthier@objective-php.org",
+      "role": "lead"
+    }
+  ],
+  "require": {
+    "php": ">=7.0",
+    "objective-php/gateway": "dev-master",
+    "solarium/solarium": "^3.8",
+    "minimalcode/search": "^1.0"
+  },
+  "require-dev": {
+    "codeception/codeception": "^2.1"
+  },
+  "autoload": {
+    "psr-4": {
+      "ObjectivePHP\\Gateway\\SolR\\": "src/"
+    }
+  }
+}
