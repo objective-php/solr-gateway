@@ -1,20 +1,35 @@
 <?php
 
-namespace ObjectivePHP\Gateway;
+namespace ObjectivePHP\Gateway\SolR;
 
+use ObjectivePHP\Gateway\AbstractPaginableGateway;
 use ObjectivePHP\Gateway\Entity\EntityInterface;
-use ObjectivePHP\Gateway\Entity\EntitySet;
-use ObjectivePHP\Gateway\Entity\EntitySetDescriptorInterface;
-use ObjectivePHP\Gateway\Entity\ResultSetInterface;
-use ObjectivePHP\Gateway\Entity\PaginatedEntitySet;
+use ObjectivePHP\Gateway\Exception\GatewayException;
+use ObjectivePHP\Gateway\Projection\PaginatedProjection;
+use ObjectivePHP\Gateway\Projection\PaginatedProjectionInterface;
+use ObjectivePHP\Gateway\Projection\Projection;
+use ObjectivePHP\Gateway\Projection\ProjectionInterface;
+use ObjectivePHP\Gateway\ResultSet\Descriptor\ResultSetDescriptorInterface;
+use ObjectivePHP\Gateway\ResultSet\PaginatedResultSet;
+use ObjectivePHP\Gateway\ResultSet\PaginatedResultSetInterface;
+use ObjectivePHP\Gateway\ResultSet\ResultSet;
+use ObjectivePHP\Gateway\ResultSet\ResultSetInterface;
+use ObjectivePHP\Gateway\SolR\Exception\SolrGatewayException;
 use Solarium\Client;
+use Solarium\Core\Client\Request;
 use Solarium\Core\Query\QueryInterface;
+use Solarium\Core\Query\Result\ResultInterface;
 use Solarium\QueryType\Select\Query\Query;
 use Solarium\QueryType\Select\Result\Document;
 use Solarium\QueryType\Select\Result\Result;
 
 
-abstract class AbstractSolrGateway extends AbstractGateway
+/**
+ * Class AbstractSolrGateway
+ *
+ * @package ObjectivePHP\Gateway\SolR
+ */
+abstract class AbstractSolrGateway extends AbstractPaginableGateway
 {
     /**
      * Solr client.
@@ -23,11 +38,16 @@ abstract class AbstractSolrGateway extends AbstractGateway
      */
     protected $client;
     
-    public function fetchAll(EntitySetDescriptorInterface $descriptor) : ResultSetInterface
+    /**
+     * @param ResultSetDescriptorInterface $resultSetDescriptor
+     *
+     * @return ProjectionInterface
+     */
+    public function fetch(ResultSetDescriptorInterface $resultSetDescriptor): ProjectionInterface
     {
         $query = $this->getClient()->createSelect();
         
-        $filters = $descriptor->getFilters();
+        $filters = $resultSetDescriptor->getFilters();
         foreach ($filters as $filter) {
             switch ($filter['operator']) {
                 
@@ -39,17 +59,15 @@ abstract class AbstractSolrGateway extends AbstractGateway
             $query->createFilterQuery($filter['property'])->setQuery($filterQuery);
         }
         
-        if($size = $descriptor->getSize())
-        {
+        if ($size = $resultSetDescriptor->getSize()) {
             $this->paginateNextQuery = false;
             $query->setStart(0)->setRows($size);
-        } else if($page = $descriptor->getPage())
-        {
-            $this->paginate($page, $descriptor->getPageSize());
+        } else if ($page = $resultSetDescriptor->getPage()) {
+            $this->paginate($page, $resultSetDescriptor->getPageSize());
         }
         
         
-        return $this->query($query);
+        return $this->query($query, self::FETCH_PROJECTION);
     }
     
     /**
@@ -72,59 +90,149 @@ abstract class AbstractSolrGateway extends AbstractGateway
         return $this;
     }
     
-    public function query(QueryInterface $query)
+    public function query(QueryInterface $query, $mode = self::FETCH_ENTITIES)
     {
         $this->preparePagination($query);
         
         /** @var Result $result */
         $result = $this->getClient()->execute($query);
         
-        
-        $resultSet = ($this->paginateNextQuery) ? new PaginatedEntitySet() : new EntitySet();
-        
-        if($resultSet instanceof PaginatedEntitySet)
+        switch($mode)
         {
-            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->perPage)->setTotal($result->getNumFound());
+            case self::FETCH_ENTITIES:
+                return $this->buildResultSet($result);
+                
+            case self::FETCH_PROJECTION:
+                return $this->buildProjection($result);
+                
+            default:
+                throw new GatewayException(sprintf('Unknown query mode "%s"', $mode));
         }
         
+    }
+    
+    protected function buildResultSet(ResultInterface $result) : ResultSetInterface
+    {
+        $resultSet = ($this->paginateNextQuery) ? new PaginatedResultSet() : new ResultSet();
+    
+        if ($resultSet instanceof PaginatedResultSetInterface) {
+            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
+                $result->getNumFound()
+            )
+            ;
+        }
+    
         /** @var Document $document */
-        foreach($result->getDocuments() as $document)
-        {
-            $entity = $this->entityFactory($document->getFields());
+        foreach ($result->getDocuments() as $document) {
+            $entity      = $this->entityFactory($document->getFields());
             $resultSet[] = $entity;
         }
-        
-        $this->reset();
-        
+    
         return $resultSet;
     }
+    
+    protected function buildProjection(ResultInterface $result) : ProjectionInterface
+    {
+        $resultSet = ($this->paginateNextQuery) ? new PaginatedProjection() : new Projection();
+    
+        if ($resultSet instanceof PaginatedProjectionInterface) {
+            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
+                $result->getNumFound()
+            )
+            ;
+        }
+    
+        /** @var Document $document */
+        foreach ($result->getDocuments() as $document) {
+            $entity      = $this->entityFactory($document->getFields());
+            $resultSet[] = $entity;
+        }
+    
+        return $resultSet;
+    }
+    
     
     protected function preparePagination(QueryInterface $query)
     {
         if ($this->paginateNextQuery && $query instanceof Query) {
-            $start = ($this->currentPage - 1) * $this->perPage;
-            $query->setStart($start)->setRows($this->perPage);
+            $start = ($this->currentPage - 1) * $this->pageSize;
+            $query->setStart($start)->setRows($this->pageSize);
         }
     }
     
-    /**
-     * @param EntityInterface $entity
-     *
-     * @throws Exception
-     */
-    public function persist(EntityInterface $entity)
+    public function fetchOne($key): EntityInterface
     {
-        throw new Exception('Not implemented yet');
+        $query = $this->getClient()->createSelect();
+        $query->createFilterQuery('id')->setQuery('id:' . $key);
+        
+        $result = $this->query($query);
+        
+        return $result[0];
+    }
+    
+    /**
+     * @param ResultSetDescriptorInterface $descriptor
+     * @param mixed                        $data
+     *
+     * @throws SolrGatewayException
+     */
+    public function update(ResultSetDescriptorInterface $descriptor, $data)
+    {
+        throw new SolrGatewayException('update() method is not handled by this gateway yet');
+    }
+    
+    /**
+     * @param ResultSetDescriptorInterface $resultSetDescriptor
+     *
+     * @throws SolrGatewayException
+     */
+    public function purge(ResultSetDescriptorInterface $resultSetDescriptor)
+    {
+        throw new SolrGatewayException('purge() method is not handled by this gateway yet');
+    }
+    
+    /**
+     * @param ResultSetDescriptorInterface $descriptor
+     *
+     * @return ResultSetInterface
+     * @throws SolrGatewayException
+     */
+    public function fetchAll(ResultSetDescriptorInterface $descriptor): ResultSetInterface
+    {
+        throw new SolrGatewayException('fetchAll() method is not handled by this gateway yet');
     }
     
     /**
      * @param EntityInterface $entity
      *
-     * @throws Exception
+     * @throws GatewayException
      */
-    public function delete(EntityInterface $entity)
+    public function persist(EntityInterface ...$entities): bool
     {
-        throw new Exception('Not implemented yet');
+        $this->triggerDeltaImport();
+        // throw new GatewayException('Not implemented yet');
+    }
+    
+    /**
+     * @param EntityInterface $entity
+     *
+     * @throws GatewayException
+     */
+    public function delete(EntityInterface ...$entities): bool
+    {
+        throw new GatewayException('Not implemented yet');
+    }
+    
+    /**
+     *
+     */
+    public function triggerDeltaImport()
+    {
+        $request = new Request();
+        $request->setHandler('dataimport');
+        $request->addParam('command', 'delta-import');
+    
+        $this->getClient()->executeRequest($request);
     }
     
 }
