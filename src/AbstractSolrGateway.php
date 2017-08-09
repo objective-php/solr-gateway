@@ -3,8 +3,10 @@
 namespace ObjectivePHP\Gateway\SolR;
 
 use ObjectivePHP\Gateway\AbstractPaginableGateway;
+use ObjectivePHP\Gateway\Entity\Entity;
 use ObjectivePHP\Gateway\Entity\EntityInterface;
 use ObjectivePHP\Gateway\Exception\GatewayException;
+use ObjectivePHP\Gateway\Hydrator\DenormalizedDataExtractorInterface;
 use ObjectivePHP\Gateway\Projection\PaginatedProjection;
 use ObjectivePHP\Gateway\Projection\PaginatedProjectionInterface;
 use ObjectivePHP\Gateway\Projection\Projection;
@@ -50,7 +52,6 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         $filters = $resultSetDescriptor->getFilters();
         foreach ($filters as $filter) {
             switch ($filter['operator']) {
-                
                 default:
                     $filterQuery = $filter['property'] . ':' . $filter['value'];
                     break;
@@ -97,60 +98,18 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         /** @var Result $result */
         $result = $this->getClient()->execute($query);
         
-        switch($mode)
-        {
+        switch ($mode) {
             case self::FETCH_ENTITIES:
                 return $this->buildResultSet($result);
-                
+            
             case self::FETCH_PROJECTION:
                 return $this->buildProjection($result);
-                
+            
             default:
                 throw new GatewayException(sprintf('Unknown query mode "%s"', $mode));
         }
         
     }
-    
-    protected function buildResultSet(ResultInterface $result) : ResultSetInterface
-    {
-        $resultSet = ($this->paginateNextQuery) ? new PaginatedResultSet() : new ResultSet();
-    
-        if ($resultSet instanceof PaginatedResultSetInterface) {
-            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
-                $result->getNumFound()
-            )
-            ;
-        }
-    
-        /** @var Document $document */
-        foreach ($result->getDocuments() as $document) {
-            $entity      = $this->entityFactory($document->getFields());
-            $resultSet[] = $entity;
-        }
-    
-        return $resultSet;
-    }
-    
-    protected function buildProjection(ResultInterface $result) : ProjectionInterface
-    {
-        $resultSet = ($this->paginateNextQuery) ? new PaginatedProjection() : new Projection();
-    
-        if ($resultSet instanceof PaginatedProjectionInterface) {
-            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
-                $result->getNumFound()
-            )
-            ;
-        }
-    
-        /** @var Document $document */
-        foreach ($result->getDocuments() as $document) {
-            $entity      = $this->entityFactory($document->getFields());
-            $resultSet[] = $entity;
-        }
-    
-        return $resultSet;
-    }
-    
     
     protected function preparePagination(QueryInterface $query)
     {
@@ -160,12 +119,98 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         }
     }
     
+    protected function buildResultSet(ResultInterface $result): ResultSetInterface
+    {
+        $resultSet = ($this->paginateNextQuery) ? new PaginatedResultSet() : new ResultSet();
+        
+        if ($resultSet instanceof PaginatedResultSetInterface) {
+            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
+                $result->getNumFound()
+            )
+            ;
+        }
+        
+        /** @var Document $document */
+        foreach ($result->getDocuments() as $document) {
+            $entity      = $this->entityFactory($document->getFields());
+            $resultSet[] = $entity;
+        }
+        
+        return $resultSet;
+    }
+    
+    protected function buildProjection(ResultInterface $result): ProjectionInterface
+    {
+        $resultSet = ($this->paginateNextQuery) ? new PaginatedProjection() : new Projection();
+        
+        if ($resultSet instanceof PaginatedProjectionInterface) {
+            $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
+                $result->getNumFound()
+            )
+            ;
+        }
+        
+        $hydrator = $this->getHydrator();
+        
+        /** @var Document $document */
+        $documents = $result->getDocuments();
+        foreach ($documents as $document) {
+            $documentFields = $document->getFields();
+            unset($documentFields['score']);
+            unset($documentFields['_version_']);
+            $entity = new Entity();
+            $hydrator->hydrate($documentFields, $entity);
+            $resultSet[] = $entity;
+        }
+        
+        return $resultSet;
+    }
+    
+    /**
+     * @param ResultSetDescriptorInterface $resultSetDescriptor
+     *
+     * @return ResultSetInterface
+     */
+    public function fetchAll(ResultSetDescriptorInterface $resultSetDescriptor): ResultSetInterface
+    {
+        $query = $this->getClient()->createSelect();
+        
+        $filters = $resultSetDescriptor->getFilters();
+        foreach ($filters as $filter) {
+            switch ($filter['operator']) {
+                
+                default:
+                    $filterQuery = $filter['property'] . ':' . $filter['value'];
+                    break;
+            }
+            
+            $query->createFilterQuery($filter['property'])->setQuery($filterQuery);
+        }
+        
+        if ($size = $resultSetDescriptor->getSize()) {
+            $this->paginateNextQuery = false;
+            $query->setStart(0)->setRows($size);
+        } else if ($page = $resultSetDescriptor->getPage()) {
+            $this->paginate($page, $resultSetDescriptor->getPageSize());
+        }
+        
+        if($sort = $resultSetDescriptor->getSort())
+        {
+            foreach($sort as $property => $direction)
+            {
+                $query->addSort($property, $direction);
+            }
+        }
+        
+        return $this->query($query, self::FETCH_ENTITIES);
+    }
+    
     public function fetchOne($key): EntityInterface
     {
         $query = $this->getClient()->createSelect();
         $query->createFilterQuery('id')->setQuery('id:' . $key);
         
-        $result = $this->query($query);
+        $result = $this->query($query, self::FETCH_ENTITIES);
         
         return $result[0];
     }
@@ -192,25 +237,44 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
     }
     
     /**
-     * @param ResultSetDescriptorInterface $descriptor
-     *
-     * @return ResultSetInterface
-     * @throws SolrGatewayException
-     */
-    public function fetchAll(ResultSetDescriptorInterface $descriptor): ResultSetInterface
-    {
-        throw new SolrGatewayException('fetchAll() method is not handled by this gateway yet');
-    }
-    
-    /**
      * @param EntityInterface $entity
      *
      * @throws GatewayException
      */
     public function persist(EntityInterface ...$entities): bool
     {
-        $this->triggerDeltaImport();
-        // throw new GatewayException('Not implemented yet');
+        
+        $update = $this->getClient()->createUpdate();
+        foreach ($entities as $entity) {
+            try {
+                $hydrator = $this->getHydrator();
+                
+                if ($hydrator instanceof DenormalizedDataExtractorInterface) {
+                    $data = $hydrator->extractDenormalized($entity);
+                } else {
+                    $data = $hydrator->extract($entity);
+                }
+                
+                foreach ($data as $field => &$value) {
+                    if ($value instanceof \DateTime) {
+                        $value = $value->format(\DateTime::ISO8601);
+                    }
+                }
+                
+                var_dump($data);
+                $update->addDocument($update->createDocument($data));
+                
+                $update->addCommit();
+                
+                $result = $this->getClient()->update($update);
+            } catch
+            (\Exception $e) {
+                die($e->getFile() . ':' . $e->getLine() . ' => ' . $e->getMessage());
+            }
+        }
+        
+        return true;
+        
     }
     
     /**
@@ -218,20 +282,23 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
      *
      * @throws GatewayException
      */
-    public function delete(EntityInterface ...$entities): bool
-    {
+    public
+    function delete(
+        EntityInterface ...$entities
+    ): bool {
         throw new GatewayException('Not implemented yet');
     }
     
     /**
      *
      */
-    public function triggerDeltaImport()
+    public
+    function triggerDeltaImport()
     {
         $request = new Request();
         $request->setHandler('dataimport');
         $request->addParam('command', 'delta-import');
-    
+        
         $this->getClient()->executeRequest($request);
     }
     

@@ -19,7 +19,7 @@
   ],
   "require": {
     "php": ">=7.0",
-    "objective-php/gateway": "dev-master",
+    "objective-php/gateway": "^1.0.0",
     "objective-php/solarium-package": "dev-master"
   },
   "require-dev": {
