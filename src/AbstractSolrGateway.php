@@ -261,7 +261,6 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
                     }
                 }
                 
-                var_dump($data);
                 $update->addDocument($update->createDocument($data));
                 
                 $update->addCommit();
