@@ -44,6 +44,7 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
      * @param ResultSetDescriptorInterface $resultSetDescriptor
      *
      * @return ProjectionInterface
+     * @throws GatewayException
      */
     public function fetch(ResultSetDescriptorInterface $resultSetDescriptor): ProjectionInterface
     {
@@ -91,6 +92,13 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         return $this;
     }
 
+    /**
+     * @param QueryInterface $query
+     * @param int            $mode
+     *
+     * @return ProjectionInterface|ResultSetInterface
+     * @throws GatewayException
+     */
     public function query(QueryInterface $query, $mode = self::FETCH_ENTITIES)
     {
         $this->preparePagination($query);
@@ -111,6 +119,9 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
 
     }
 
+    /**
+     * @param QueryInterface $query
+     */
     protected function preparePagination(QueryInterface $query)
     {
         if ($this->paginateNextQuery && $query instanceof Query) {
@@ -119,9 +130,15 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         }
     }
 
+    /**
+     * @param ResultInterface $result
+     *
+     * @return ResultSetInterface
+     * @throws GatewayException
+     */
     protected function buildResultSet(ResultInterface $result): ResultSetInterface
     {
-        $resultSet = ($this->paginateNextQuery) ? new PaginatedResultSet() : new ResultSet();
+        $resultSet = $this->paginateNextQuery ? new PaginatedResultSet() : new ResultSet();
 
         if ($resultSet instanceof PaginatedResultSetInterface) {
             $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
@@ -139,9 +156,14 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         return $resultSet;
     }
 
+    /**
+     * @param ResultInterface $result
+     *
+     * @return ProjectionInterface
+     */
     protected function buildProjection(ResultInterface $result): ProjectionInterface
     {
-        $resultSet = ($this->paginateNextQuery) ? new PaginatedProjection() : new Projection();
+        $resultSet = $this->paginateNextQuery ? new PaginatedProjection() : new Projection();
 
         if ($resultSet instanceof PaginatedProjectionInterface) {
             $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
@@ -156,8 +178,7 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         $documents = $result->getDocuments();
         foreach ($documents as $document) {
             $documentFields = $document->getFields();
-            unset($documentFields['score']);
-            unset($documentFields['_version_']);
+            unset($documentFields['score'], $documentFields['_version_']);
             $entity = new Entity();
             $hydrator->hydrate($documentFields, $entity);
             $resultSet[] = $entity;
@@ -170,6 +191,7 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
      * @param ResultSetDescriptorInterface $resultSetDescriptor
      *
      * @return ResultSetInterface
+     * @throws GatewayException
      */
     public function fetchAll(ResultSetDescriptorInterface $resultSetDescriptor): ResultSetInterface
     {
@@ -205,6 +227,12 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         return $this->query($query, self::FETCH_ENTITIES);
     }
 
+    /**
+     * @param $key
+     *
+     * @return EntityInterface
+     * @throws GatewayException
+     */
     public function fetchOne($key): EntityInterface
     {
         $query = $this->getClient()->createSelect();
@@ -239,7 +267,51 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
     /**
      * @param EntityInterface $entity
      *
-     * @throws GatewayException
+     * @return bool
+     * @throws SolrGatewayException
+     */
+    public function create(EntityInterface $entity): bool
+    {
+        $update = $this->getClient()->createUpdate();
+
+        if (!$this->getOptions()['id']) {
+            throw new SolrGatewayException('Missing ID to create an entity. Did you forget to call Metagateway::setNewId ?');
+        }
+
+        $entity[$entity->getEntityIdentifier()] = $this->getOptions()['id'];
+
+        try {
+            $hydrator = $this->getHydrator();
+
+            if ($hydrator instanceof DenormalizedDataExtractorInterface) {
+                $data = $hydrator->extractDenormalized($entity);
+            } else {
+                $data = $hydrator->extract($entity);
+            }
+
+            foreach ($data as $field => &$value) {
+                if ($value instanceof \DateTime) {
+                    $value = $value->format(\DateTime::ATOM);
+                }
+            }
+
+            $update->addDocument($update->createDocument($data));
+            $update->addCommit();
+
+            $this->getClient()->update($update);
+        } catch (\Exception $e) {
+            throw new SolrGatewayException($e->getMessage(), $e->getCode(), $e);
+        }
+
+        return true;
+    }
+
+
+    /**
+     * @param EntityInterface[] $entities
+     *
+     * @return bool
+     * @throws SolrGatewayException
      */
     public function persist(EntityInterface ...$entities): bool
     {
@@ -273,26 +345,19 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         }
 
         return true;
-
     }
 
     /**
-     * @param EntityInterface $entity
+     * @param EntityInterface[] $entities
      *
+     * @return bool
      * @throws GatewayException
      */
-    public
-    function delete(
-        EntityInterface ...$entities
-    ): bool {
+    public function delete(EntityInterface ...$entities): bool {
         throw new GatewayException('Not implemented yet');
     }
 
-    /**
-     *
-     */
-    public
-    function triggerDeltaImport()
+    public function triggerDeltaImport()
     {
         $request = new Request();
         $request->setHandler('dataimport');
@@ -300,5 +365,4 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
 
         $this->getClient()->executeRequest($request);
     }
-
 }
