@@ -257,11 +257,17 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
     /**
      * @param ResultSetDescriptorInterface $resultSetDescriptor
      *
-     * @throws SolrGatewayException
+     * @return \Solarium\QueryType\Update\Result
      */
     public function purge(ResultSetDescriptorInterface $resultSetDescriptor)
     {
-        throw new SolrGatewayException('purge() method is not handled by this gateway yet');
+        $client = $this->getClient();
+
+        $update = $client->createUpdate();
+        $query = $update->addDeleteQuery('*:*');
+        $query->addCommit();
+
+        return $client->update($query);
     }
 
     /**
@@ -315,7 +321,6 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
      */
     public function persist(EntityInterface ...$entities): bool
     {
-
         $update = $this->getClient()->createUpdate();
         foreach ($entities as $entity) {
             try {
@@ -334,12 +339,10 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
                 }
 
                 $update->addDocument($update->createDocument($data));
-
                 $update->addCommit();
+                $this->getClient()->update($update);
 
-                $result = $this->getClient()->update($update);
-            } catch
-            (\Exception $e) {
+            } catch (\Exception $e) {
                 throw new SolrGatewayException($e->getMessage(), $e->getCode(), $e);
             }
         }
@@ -351,10 +354,25 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
      * @param EntityInterface[] $entities
      *
      * @return bool
-     * @throws GatewayException
+     *
+     * @throws SolrGatewayException
      */
-    public function delete(EntityInterface ...$entities): bool {
-        throw new GatewayException('Not implemented yet');
+    public function delete(EntityInterface ...$entities): bool
+    {
+        $update = $this->getClient()->createUpdate();
+
+        foreach ($entities as $entity) {
+            try {
+                $query = $update->addDeleteQuery("id:{$entity[$entity->getEntityIdentifier()]}");
+                $query->addCommit();
+                $this->getClient()->update($query);
+
+            } catch (\Exception $e) {
+                throw new SolrGatewayException($e->getMessage(), $e->getCode(), $e);
+            }
+        }
+
+        return true;
     }
 
     public function triggerDeltaImport()
