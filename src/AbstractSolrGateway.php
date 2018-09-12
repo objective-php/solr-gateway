@@ -360,16 +360,18 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
     public function delete(EntityInterface ...$entities): bool
     {
         $update = $this->getClient()->createUpdate();
+        $ids = [];
 
         foreach ($entities as $entity) {
-            try {
-                $query = $update->addDeleteQuery("id:{$entity[$entity->getEntityIdentifier()]}");
-                $query->addCommit();
-                $this->getClient()->update($query);
+            $ids[] = $entity[$entity->getEntityIdentifier()];
+        }
 
-            } catch (\Exception $e) {
-                throw new SolrGatewayException($e->getMessage(), $e->getCode(), $e);
-            }
+        try {
+            $query = $update->addDeleteByIds($ids);
+            $query->addCommit();
+            $this->getClient()->update($query);
+        } catch (\Exception $e) {
+            throw new SolrGatewayException($e->getMessage(), $e->getCode(), $e);
         }
 
         return true;
