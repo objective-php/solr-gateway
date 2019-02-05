@@ -25,7 +25,6 @@ use Solarium\QueryType\Select\Query\Query;
 use Solarium\QueryType\Select\Result\Document;
 use Solarium\QueryType\Select\Result\Result;
 
-
 /**
  * Class AbstractSolrGateway
  *
@@ -48,48 +47,24 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
      */
     public function fetch(ResultSetDescriptorInterface $resultSetDescriptor): ProjectionInterface
     {
-        $query = $this->getClient()->createSelect();
-
-        $filters = $resultSetDescriptor->getFilters();
-        foreach ($filters as $filter) {
-            switch ($filter['operator']) {
-                default:
-                    $filterQuery = $filter['property'] . ':' . $filter['value'];
-                    break;
-            }
-
-            $query->createFilterQuery($filter['property'])->setQuery($filterQuery);
-        }
-
-        if ($size = $resultSetDescriptor->getSize()) {
-            $this->paginateNextQuery = false;
-            $query->setStart(0)->setRows($size);
-        } else if ($page = $resultSetDescriptor->getPage()) {
-            $this->paginate($page, $resultSetDescriptor->getPageSize());
-        }
-
-
-        return $this->query($query, self::FETCH_PROJECTION);
+        return $this->query(
+            $this->buildQuery($this->getClient()->createSelect(), $resultSetDescriptor),
+            self::FETCH_PROJECTION
+        );
     }
 
     /**
-     * @return Client
-     */
-    public function getClient(): Client
-    {
-        return $this->client;
-    }
-
-    /**
-     * @param Client $client
+     * @param ResultSetDescriptorInterface $resultSetDescriptor
      *
-     * @return AbstractSolrGateway
+     * @return ResultSetInterface
+     * @throws GatewayException
      */
-    public function setClient(Client $client): AbstractSolrGateway
+    public function fetchAll(ResultSetDescriptorInterface $resultSetDescriptor): ResultSetInterface
     {
-        $this->client = $client;
-
-        return $this;
+        return $this->query(
+            $this->buildQuery($this->getClient()->createSelect(), $resultSetDescriptor),
+            self::FETCH_ENTITIES
+        );
     }
 
     /**
@@ -116,7 +91,6 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
             default:
                 throw new GatewayException(sprintf('Unknown query mode "%s"', $mode));
         }
-
     }
 
     /**
@@ -128,6 +102,76 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
             $start = ($this->currentPage - 1) * $this->pageSize;
             $query->setStart($start)->setRows($this->pageSize);
         }
+    }
+
+    /**
+     * Build Solr query from result set descriptor
+     *
+     * @param Query                        $query
+     * @param ResultSetDescriptorInterface $resultSetDescriptor
+     *
+     * @return Query
+     */
+    protected function buildQuery(Query $query, ResultSetDescriptorInterface $resultSetDescriptor)
+    {
+        $filters = $resultSetDescriptor->getFilters();
+
+        $ranges = [];
+
+        foreach ($filters as $filter) {
+            if ($filter['value'] instanceof \DateTimeInterface) {
+                $filter['value'] = $filter['value']->format('Y-m-d\TH:i:s\Z');
+            }
+
+            $filter['value'] = $query->getHelper()->escapePhrase($filter['value']);
+
+            switch ($filter['operator']) {
+                case ResultSetDescriptorInterface::OP_GTOE:
+                    $ranges[$filter['property']][0] = '[' . $filter['value'];
+                    break;
+                case ResultSetDescriptorInterface::OP_GT:
+                    $ranges[$filter['property']][0] = '{' . $filter['value'];
+                    break;
+                case ResultSetDescriptorInterface::OP_LTOE:
+                    $ranges[$filter['property']][1] = $filter['value'] . ']';
+                    break;
+                case ResultSetDescriptorInterface::OP_LT:
+                    $ranges[$filter['property']][1] = $filter['value'] . '}';
+                    break;
+                default:
+                    $filterQuery = $filter['property'] . ':' . $filter['value'];
+                    $query->createFilterQuery($filter['property'])->setQuery($filterQuery);
+                    break;
+            }
+        }
+
+        foreach ($ranges as $property => $range) {
+            if (count($range) == 2) {
+                ksort($range);
+                $query->createFilterQuery($property)->setQuery($property . ':' . implode(' TO ', $range));
+            } elseif (count($range) == 1) {
+                if (array_key_exists(1, $range)) {
+                    $query->createFilterQuery($property)->setQuery($property . ':' . sprintf('[* TO %s', $range[1]));
+                } elseif (array_key_exists(0, $range)) {
+                    $query->createFilterQuery($property)->setQuery($property . ':' . sprintf('%s TO *]', $range[0]));
+                }
+            }
+        }
+
+        if ($sort = $resultSetDescriptor->getSort()) {
+            foreach ($sort as $property => $direction) {
+                $query->addSort($property, $direction);
+            }
+        }
+
+        if ($size = $resultSetDescriptor->getSize()) {
+            $this->paginateNextQuery = false;
+            $query->setStart(0)->setRows($size);
+        } elseif ($page = $resultSetDescriptor->getPage()) {
+            $this->paginate($page, $resultSetDescriptor->getPageSize());
+        }
+
+        return $query;
     }
 
     /**
@@ -143,13 +187,12 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         if ($resultSet instanceof PaginatedResultSetInterface) {
             $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
                 $result->getNumFound()
-            )
-            ;
+            );
         }
 
         /** @var Document $document */
         foreach ($result->getDocuments() as $document) {
-            $entity      = $this->entityFactory($document->getFields());
+            $entity = $this->entityFactory($document->getFields());
             $resultSet[] = $entity;
         }
 
@@ -168,8 +211,7 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         if ($resultSet instanceof PaginatedProjectionInterface) {
             $resultSet->setCurrentPage($this->currentPage)->setPerPage($this->pageSize)->setTotal(
                 $result->getNumFound()
-            )
-            ;
+            );
         }
 
         $hydrator = $this->getHydrator();
@@ -185,46 +227,6 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         }
 
         return $resultSet;
-    }
-
-    /**
-     * @param ResultSetDescriptorInterface $resultSetDescriptor
-     *
-     * @return ResultSetInterface
-     * @throws GatewayException
-     */
-    public function fetchAll(ResultSetDescriptorInterface $resultSetDescriptor): ResultSetInterface
-    {
-        $query = $this->getClient()->createSelect();
-
-        $filters = $resultSetDescriptor->getFilters();
-        foreach ($filters as $filter) {
-            switch ($filter['operator']) {
-
-                default:
-                    $filterQuery = $filter['property'] . ':' . $filter['value'];
-                    break;
-            }
-
-            $query->createFilterQuery($filter['property'])->setQuery($filterQuery);
-        }
-
-        if ($size = $resultSetDescriptor->getSize()) {
-            $this->paginateNextQuery = false;
-            $query->setStart(0)->setRows($size);
-        } else if ($page = $resultSetDescriptor->getPage()) {
-            $this->paginate($page, $resultSetDescriptor->getPageSize());
-        }
-
-        if($sort = $resultSetDescriptor->getSort())
-        {
-            foreach($sort as $property => $direction)
-            {
-                $query->addSort($property, $direction);
-            }
-        }
-
-        return $this->query($query, self::FETCH_ENTITIES);
     }
 
     /**
@@ -281,7 +283,9 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         $update = $this->getClient()->createUpdate();
 
         if (!$this->getOptions()['id']) {
-            throw new SolrGatewayException('Missing ID to create an entity. Did you forget to call Metagateway::setNewId ?');
+            throw new SolrGatewayException(
+                'Missing ID to create an entity. Did you forget to call Metagateway::setNewId ?'
+            );
         }
 
         $entity[$entity->getEntityIdentifier()] = $this->getOptions()['id'];
@@ -384,5 +388,29 @@ abstract class AbstractSolrGateway extends AbstractPaginableGateway
         $request->addParam('command', 'delta-import');
 
         $this->getClient()->executeRequest($request);
+    }
+
+    /**
+     * Get Client
+     *
+     * @return Client
+     */
+    public function getClient(): Client
+    {
+        return $this->client;
+    }
+
+    /**
+     * Set Client
+     *
+     * @param Client $client
+     *
+     * @return $this
+     */
+    public function setClient(Client $client)
+    {
+        $this->client = $client;
+
+        return $this;
     }
 }
